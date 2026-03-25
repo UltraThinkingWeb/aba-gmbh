@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 #  remote-setup.sh  –  runs ON the SSH server
 #  Idempotent: safe to re-run on every deploy
