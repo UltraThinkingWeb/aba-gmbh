@@ -1,0 +1,20 @@
+{
+  "name": "neuer-ordner",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "agent:install": "pip install -r agents/requirements.txt",
+    "agent:test": "python3 agents/agent_runner.py \"{\\\"agent\\\":\\\"WebScraperAgent\\\",\\\"task\\\":\\\"search_references\\\",\\\"data\\\":{\\\"query\\\":\\\"modern house design 2026\\\"}}\"",
+    "agent:seo:test": "python3 agents/agent_runner.py \"{\\\"agent\\\":\\\"SeoAgent\\\",\\\"task\\\":\\\"seo_audit\\\",\\\"data\\\":{\\\"urls\\\":[\\\"https://example.com\\\"]}}\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "nodemailer": "^8.0.3"
+  }
+}

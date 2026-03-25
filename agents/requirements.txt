@@ -1,0 +1,7 @@
+aiohttp==3.9.1
+beautifulsoup4==4.12.2
+trafilatura==1.8.1
+requests==2.31.0
+lxml==4.9.3
+html5lib==1.1
+fake-useragent==1.4.0

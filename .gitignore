@@ -1,0 +1,9 @@
+.env
+node_modules/
+contact-submissions.ndjson
+agent_logs.ndjson
+__pycache__/
+agents/__pycache__/
+.mypy_cache/
+*.pyc
+
