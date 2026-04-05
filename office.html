@@ -693,6 +693,29 @@
         setStatus('admin-status', message || 'Bitte mit Admin-Zugang einloggen, um die internen Module zu verwalten.', type || '');
       }
 
+        const FALLBACK_API_ORIGIN = 'https://aba-gmbh.eu';
+
+        function buildApiCandidates(url) {
+          if (/^https?:\/\//i.test(url)) {
+            return [url];
+          }
+
+          const candidates = [];
+          const protocol = window.location.protocol || '';
+          const hasHttpOrigin = protocol === 'http:' || protocol === 'https:';
+
+          if (hasHttpOrigin && window.location.origin) {
+            candidates.push(new URL(url, window.location.origin).toString());
+          }
+
+          const fallbackUrl = new URL(url, FALLBACK_API_ORIGIN).toString();
+          if (!candidates.includes(fallbackUrl)) {
+            candidates.push(fallbackUrl);
+          }
+
+          return candidates;
+        }
+
       async function apiRequest(url, options = {}) {
         const headers = {
           'Content-Type': 'application/json',
@@ -709,15 +732,30 @@
           headers
         };
 
-        const response = await fetch(url, config);
-        const contentType = response.headers.get('content-type') || '';
-        const data = contentType.includes('application/json') ? await response.json() : null;
+        let lastError = null;
 
-        if (!response.ok) {
-          throw new Error((data && data.error) || 'Anfrage fehlgeschlagen.');
+        for (const candidate of buildApiCandidates(url)) {
+          try {
+            const response = await fetch(candidate, config);
+            const contentType = response.headers.get('content-type') || '';
+            const data = contentType.includes('application/json') ? await response.json() : null;
+
+            if (!response.ok) {
+              throw new Error((data && data.error) || 'Anfrage fehlgeschlagen.');
+            }
+
+            return data;
+          } catch (error) {
+            lastError = error;
+          }
         }
 
-        return data;
+        const message = String((lastError && lastError.message) || '').trim();
+        if (/failed to fetch|networkerror|load failed/i.test(message)) {
+          throw new Error('Netzwerkfehler. Bitte das Portal über https://aba-gmbh.eu/office.html öffnen und die Seite neu laden.');
+        }
+
+        throw lastError || new Error('Anfrage fehlgeschlagen.');
       }
 
       function renderStats() {
@@ -868,12 +906,104 @@
                   <td>${escapeHtml(invoice.customerName)}</td>
                   <td>${escapeHtml(invoice.projectName)}<br /><span class="muted">Fällig: ${escapeHtml(formatDate(invoice.dueDate))}</span></td>
                   <td>${escapeHtml(formatCurrency(invoice.totals && invoice.totals.payableAmount))}</td>
-                  <td><a class="btn btn-secondary" href="/api/admin/invoices/${invoice.id}/print" target="_blank" rel="noopener">Drucken</a></td>
+                  <td>
+                    <div class="task-actions">
+                      <a class="btn btn-secondary" href="/api/admin/invoices/${invoice.id}/print" target="_blank" rel="noopener">Ansicht</a>
+                      <button class="btn btn-secondary" type="button" data-copy-invoice="${invoice.id}">Kopieren</button>
+                      <button class="btn btn-primary" type="button" data-pdf-invoice="${invoice.id}">PDF</button>
+                    </div>
+                  </td>
                 </tr>
               `).join('')}
             </tbody>
           </table>
         `;
+
+        invoicesList.querySelectorAll('[data-copy-invoice]').forEach((button) => {
+          button.addEventListener('click', async (event) => {
+            const invoice = state.invoices.find((entry) => entry.id === event.currentTarget.getAttribute('data-copy-invoice'));
+            if (!invoice) return;
+            try {
+              await copyTextToClipboard(buildInvoiceClipboardText(invoice));
+              setStatus('invoice-status', `Rechnung ${invoice.invoiceNumber} wurde in die Zwischenablage kopiert.`, 'success');
+            } catch (error) {
+              setStatus('invoice-status', error.message, 'error');
+            }
+          });
+        });
+
+        invoicesList.querySelectorAll('[data-pdf-invoice]').forEach((button) => {
+          button.addEventListener('click', (event) => {
+            const invoiceId = event.currentTarget.getAttribute('data-pdf-invoice');
+            openPdfPrint(`/api/admin/invoices/${invoiceId}/print`);
+          });
+        });
+      }
+
+      async function copyTextToClipboard(text) {
+        const value = String(text || '').trim();
+        if (!value) {
+          throw new Error('Es gibt noch nichts zum Kopieren.');
+        }
+
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+
+        const textArea = document.createElement('textarea');
+        textArea.value = value;
+        textArea.setAttribute('readonly', 'readonly');
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+
+      function buildInvoiceClipboardText(invoice) {
+        const itemsText = (invoice.items || []).map((item, index) => {
+          return `${index + 1}. ${item.description} — ${item.quantity} ${item.unit} × ${formatCurrency(item.unitPrice)} = ${formatCurrency(item.quantity * item.unitPrice)}`;
+        }).join('\n');
+
+        return [
+          `${invoice.invoiceTypeLabel} ${invoice.invoiceNumber}`,
+          `Kunde: ${invoice.customerName}`,
+          `Projekt: ${invoice.projectName}`,
+          `Rechnungsdatum: ${formatDate(invoice.issueDate)}`,
+          `Fällig: ${formatDate(invoice.dueDate)}`,
+          '',
+          'Positionen:',
+          itemsText || '-',
+          '',
+          `Netto: ${formatCurrency(invoice.totals && invoice.totals.netAmount)}`,
+          `MwSt.: ${formatCurrency(invoice.totals && invoice.totals.vatAmount)}`,
+          `Zahlbetrag: ${formatCurrency(invoice.totals && invoice.totals.payableAmount)}`
+        ].join('\n');
+      }
+
+      function buildLvClipboardText(document) {
+        const itemsText = (document.items || []).map((item, index) => {
+          return `${index + 1}. ${item.description} — ${item.quantity} ${item.unit} × ${formatCurrency(item.unitPrice)} = ${formatCurrency(item.totalPrice)}`;
+        }).join('\n');
+
+        return [
+          `Leistungsverzeichnis ${document.referenceNumber}`,
+          `Projekt: ${document.projectName || '-'}`,
+          `Kunde: ${document.customerName || '-'}`,
+          '',
+          'Positionen:',
+          itemsText || '-',
+          '',
+          `Netto gesamt: ${formatCurrency(document.totals && document.totals.netAmount)}`
+        ].join('\n');
+      }
+
+      function openPdfPrint(url) {
+        const separator = url.includes('?') ? '&' : '?';
+        window.open(`${url}${separator}autoprint=1`, '_blank', 'noopener');
       }
 
         function renderLvPreview() {
@@ -941,14 +1071,38 @@
                   <td>${escapeHtml(doc.customerName || '–')}</td>
                   <td>${escapeHtml(formatCurrency(doc.totals && doc.totals.netAmount))}</td>
                   <td>
-                    <a class="btn btn-secondary" href="/api/admin/lv/${doc.id}/print" target="_blank" rel="noopener">Drucken</a>
-                    <a class="btn btn-blue" href="/api/admin/lv/${doc.id}/export.csv" rel="noopener">CSV</a>
+                    <div class="task-actions">
+                      <button class="btn btn-secondary" type="button" data-copy-lv="${doc.id}">Kopieren</button>
+                      <button class="btn btn-primary" type="button" data-pdf-lv="${doc.id}">PDF</button>
+                      <a class="btn btn-secondary" href="/api/admin/lv/${doc.id}/print" target="_blank" rel="noopener">Ansicht</a>
+                      <a class="btn btn-blue" href="/api/admin/lv/${doc.id}/export.csv" rel="noopener">CSV</a>
+                    </div>
                   </td>
                 </tr>
               `).join('')}
             </tbody>
           </table>
         `;
+
+        lvList.querySelectorAll('[data-copy-lv]').forEach((button) => {
+          button.addEventListener('click', async (event) => {
+            const document = state.lvDocuments.find((entry) => entry.id === event.currentTarget.getAttribute('data-copy-lv'));
+            if (!document) return;
+            try {
+              await copyTextToClipboard(buildLvClipboardText(document));
+              setStatus('lv-status', `${document.referenceNumber} wurde in die Zwischenablage kopiert.`, 'success');
+            } catch (error) {
+              setStatus('lv-status', error.message, 'error');
+            }
+          });
+        });
+
+        lvList.querySelectorAll('[data-pdf-lv]').forEach((button) => {
+          button.addEventListener('click', (event) => {
+            const documentId = event.currentTarget.getAttribute('data-pdf-lv');
+            openPdfPrint(`/api/admin/lv/${documentId}/print`);
+          });
+        });
         }
 
         async function readLvFileIntoTextarea() {
@@ -1169,9 +1323,9 @@
             method: 'POST',
             body: JSON.stringify(payload)
           });
-          setStatus('invoice-status', `Rechnung ${invoice.invoiceNumber} erstellt.`, 'success');
+          setStatus('invoice-status', `Rechnung ${invoice.invoiceNumber} erstellt. Kopieren oder PDF sind jetzt verfügbar.`, 'success');
           await loadDashboard();
-          window.open(`/api/admin/invoices/${invoice.id}/print`, '_blank', 'noopener');
+          openPdfPrint(`/api/admin/invoices/${invoice.id}/print`);
         } catch (error) {
           setStatus('invoice-status', error.message, 'error');
         }
@@ -1231,9 +1385,9 @@
             renderLvPreview();
             form.reset();
             lvRawText.value = '';
-            setStatus('lv-status', `${document.referenceNumber} wurde gespeichert.`, 'success');
+            setStatus('lv-status', `${document.referenceNumber} wurde gespeichert. Kopieren und PDF sind jetzt verfügbar.`, 'success');
             await loadDashboard();
-            window.open(`/api/admin/lv/${document.id}/print`, '_blank', 'noopener');
+            openPdfPrint(`/api/admin/lv/${document.id}/print`);
           } catch (error) {
             setStatus('lv-status', error.message, 'error');
           }

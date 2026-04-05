@@ -304,7 +304,8 @@ function buildInvoiceCompliance(invoiceInput, items) {
   };
 }
 
-function buildInvoicePrintHtml(invoice) {
+function buildInvoicePrintHtml(invoice, options = {}) {
+  const autoPrint = Boolean(options.autoPrint);
   const itemsHtml = invoice.items.map((item, index) => {
     const lineTotal = roundCurrency(normalizeNumber(item.quantity) * normalizeNumber(item.unitPrice));
     return `
@@ -415,6 +416,21 @@ function buildInvoicePrintHtml(invoice) {
       border: 1px solid #ead9a7;
       margin-top: 12px;
     }
+    .toolbar {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .toolbar button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 14px;
+      cursor: pointer;
+      color: white;
+      background: var(--green-strong);
+      font-weight: 700;
+    }
     ul {
       padding-left: 18px;
     }
@@ -425,11 +441,18 @@ function buildInvoicePrintHtml(invoice) {
       .sheet {
         max-width: none;
       }
+      .toolbar {
+        display: none;
+      }
     }
   </style>
 </head>
 <body>
   <div class="sheet">
+    <div class="toolbar">
+      <button type="button" onclick="window.print()">Als PDF speichern</button>
+      <button type="button" onclick="copyDocumentText()">Kopie</button>
+    </div>
     <div class="header">
       <div class="brand">
         <div>
@@ -527,6 +550,17 @@ function buildInvoicePrintHtml(invoice) {
       <p>${escapeHtml(invoice.notes || 'Keine zusätzlichen Hinweise.').replace(/\n/g, '<br>')}</p>
     </div>
   </div>
+  <script>
+    function copyDocumentText() {
+      const text = document.body.innerText;
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text);
+      }
+    }
+    if (${autoPrint ? 'true' : 'false'}) {
+      window.addEventListener('load', () => setTimeout(() => window.print(), 250));
+    }
+  </script>
 </body>
 </html>`;
 }
@@ -761,7 +795,8 @@ function buildLvExportCsv(document) {
   return rows.map((row) => row.map(csvEscape).join(';')).join('\r\n');
 }
 
-function buildLvPrintHtml(document) {
+function buildLvPrintHtml(document, options = {}) {
+  const autoPrint = Boolean(options.autoPrint);
   const rowsHtml = (document.items || []).map((item) => `
     <tr>
       <td>${escapeHtml(item.position)}</td>
@@ -787,10 +822,17 @@ function buildLvPrintHtml(document) {
     th { background: #edf5ed; color: #1f5f25; }
     .muted { color: #5f6f61; }
     .total { text-align: right; font-size: 18px; font-weight: 700; }
+    .toolbar { display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 16px; }
+    .toolbar button { border: 0; border-radius: 999px; padding: 10px 14px; cursor: pointer; color: white; background: #1f5f25; font-weight: 700; }
+    @media print { .toolbar { display: none; } body { padding: 0; } }
   </style>
 </head>
 <body>
   <div class="sheet">
+    <div class="toolbar">
+      <button type="button" onclick="window.print()">Als PDF speichern</button>
+      <button type="button" onclick="copyDocumentText()">Kopie</button>
+    </div>
     <div class="box">
       <h1>${escapeHtml(DEFAULT_ISSUER_DETAILS.company)}</h1>
       <p class="muted">Automatisch vorbelegtes Leistungsverzeichnis / Angebotsentwurf</p>
@@ -825,6 +867,17 @@ function buildLvPrintHtml(document) {
       </ul>
     </div>
   </div>
+  <script>
+    function copyDocumentText() {
+      const text = document.body.innerText;
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text);
+      }
+    }
+    if (${autoPrint ? 'true' : 'false'}) {
+      window.addEventListener('load', () => setTimeout(() => window.print(), 250));
+    }
+  </script>
 </body>
 </html>`;
 }
@@ -1599,6 +1652,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && /^\/api\/admin\/invoices\/[^/]+\/print$/.test(req.url.split('?')[0])) {
     const match = req.url.split('?')[0].match(/^\/api\/admin\/invoices\/([^/]+)\/print$/);
     const invoiceId = match && match[1];
+    const autoPrint = /(?:\?|&)autoprint=1(?:&|$)/.test(req.url);
 
     readInvoices().then((invoices) => {
       const invoice = invoices.find((entry) => entry.id === invoiceId);
@@ -1608,7 +1662,7 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      sendHtml(res, 200, buildInvoicePrintHtml(invoice));
+      sendHtml(res, 200, buildInvoicePrintHtml(invoice, { autoPrint }));
     }).catch(() => {
       sendHtml(res, 500, '<h1>Rechnung konnte nicht geladen werden</h1>');
     });
@@ -1677,6 +1731,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && /^\/api\/admin\/lv\/[^/]+\/print$/.test(req.url.split('?')[0])) {
     const match = req.url.split('?')[0].match(/^\/api\/admin\/lv\/([^/]+)\/print$/);
     const documentId = match && match[1];
+    const autoPrint = /(?:\?|&)autoprint=1(?:&|$)/.test(req.url);
 
     readLvDocuments().then((documents) => {
       const document = documents.find((entry) => entry.id === documentId);
@@ -1686,7 +1741,7 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      sendHtml(res, 200, buildLvPrintHtml(document));
+      sendHtml(res, 200, buildLvPrintHtml(document, { autoPrint }));
     }).catch(() => {
       sendHtml(res, 500, '<h1>Leistungsverzeichnis konnte nicht geladen werden</h1>');
     });
