@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 #  push-to-ssh.sh
 #  Syncs local files to root@37.27.216.254 via rsync, then runs remote deploy.

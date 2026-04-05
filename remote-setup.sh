@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 #  remote-setup.sh  –  runs ON the SSH server
 #  Idempotent: safe to re-run on every deploy
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 APP_DIR="/var/www/aba-website"
-OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.1:8b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.2:1b}"
 
 cd "$APP_DIR"
 
@@ -18,7 +18,11 @@ if [ ! -f .env ]; then
   echo "[ERROR] .env missing in ${APP_DIR}. Aborting."
   exit 1
 fi
-set -a; . ./.env; set +a
+
+ENV_OLLAMA_MODEL="$(grep -E '^OLLAMA_MODEL=' .env | head -n 1 | cut -d '=' -f 2- || true)"
+if [ -n "$ENV_OLLAMA_MODEL" ]; then
+  OLLAMA_MODEL="$ENV_OLLAMA_MODEL"
+fi
 
 # ── 2. Node.js ───────────────────────────────────────────────────────────────
 if ! command -v node >/dev/null 2>&1; then
@@ -33,7 +37,7 @@ fi
 echo "[2/7] Installing Node dependencies..."
 npm ci --omit=dev
 
-# ── 4. Python + pip ──────────────────────────────────────────────────────────
+# ── 4. Python + venv ─────────────────────────────────────────────────────────
 echo "[3/7] Checking Python..."
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
@@ -41,22 +45,43 @@ elif command -v python >/dev/null 2>&1; then
   PYTHON_BIN="python"
 else
   echo "      Installing python3..."
-  apt-get install -y python3 python3-pip
+  apt-get install -y python3 python3-pip python3-venv python3.12-venv
   PYTHON_BIN="python3"
 fi
 echo "      Using: $PYTHON_BIN ($($PYTHON_BIN -V))"
 
-# ensure pip
-$PYTHON_BIN -m pip install --upgrade pip --quiet
+# ensure pip + venv support
+echo "      Ensuring python venv packages are installed..."
+apt-get install -y python3-pip python3-venv python3.12-venv >/dev/null
+
+if ! $PYTHON_BIN -m pip --version >/dev/null 2>&1; then
+  echo "      Installing python3-pip..."
+  apt-get install -y python3-pip
+fi
+
+VENV_DIR="$APP_DIR/.venv"
+if [ -d "$VENV_DIR" ] && { [ ! -x "$VENV_DIR/bin/python" ] || [ ! -x "$VENV_DIR/bin/pip" ]; }; then
+  rm -rf "$VENV_DIR"
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+  echo "      Creating virtual environment..."
+  $PYTHON_BIN -m venv "$VENV_DIR"
+fi
+
+VENV_PYTHON="$VENV_DIR/bin/python"
+VENV_PIP="$VENV_DIR/bin/pip"
+
+$VENV_PIP install --upgrade pip --quiet
 
 echo "[4/7] Installing Python agent dependencies..."
-$PYTHON_BIN -m pip install -r agents/requirements.txt --quiet
+$VENV_PIP install -r agents/requirements.txt --quiet
 
 # update PYTHON_PATH in .env if it was wrong
 if ! grep -q "^PYTHON_PATH=" .env; then
-  echo "PYTHON_PATH=${PYTHON_BIN}" >> .env
+  echo "PYTHON_PATH=${VENV_PYTHON}" >> .env
 else
-  sed -i "s|^PYTHON_PATH=.*|PYTHON_PATH=${PYTHON_BIN}|" .env
+  sed -i "s|^PYTHON_PATH=.*|PYTHON_PATH=${VENV_PYTHON}|" .env
 fi
 
 # ── 5. Ollama ────────────────────────────────────────────────────────────────
@@ -96,6 +121,9 @@ echo "[6/7] Setting up pm2..."
 if ! command -v pm2 >/dev/null 2>&1; then
   npm install -g pm2
 fi
+
+# remove old conflicting app if it exists
+pm2 delete aba-site 2>/dev/null || true
 
 # node --check first
 node --check server.js
