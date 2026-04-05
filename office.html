@@ -394,6 +394,7 @@
           <a class="nav-link" href="#workers">Mitarbeiter</a>
           <a class="nav-link" href="#tasks">Aufgaben</a>
           <a class="nav-link" href="#invoices">Rechnungen</a>
+          <a class="nav-link" href="#lv">Leistungsverzeichnis</a>
           <a class="btn btn-primary" href="#worker-portal">Mitarbeiter Login</a>
           <button class="btn btn-secondary hidden" id="admin-logout" type="button">Admin Logout</button>
         </div>
@@ -413,7 +414,8 @@
           <div class="hero-actions">
             <a class="btn btn-primary" href="#invoices">Rechnung anlegen</a>
             <a class="btn btn-secondary" href="#workers">Mitarbeiter registrieren</a>
-            <a class="btn btn-blue" href="#worker-portal">Online-Aufgaben öffnen</a>
+            <a class="btn btn-blue" href="#lv">LV automatisch bepreisen</a>
+            <a class="btn btn-secondary" href="#worker-portal">Online-Aufgaben öffnen</a>
           </div>
           <div class="callout">
             <strong>Wichtiger Hinweis:</strong> Die Faktura-Vorlage unterstützt die Praxis mit Feldern nach deutschem Rechnungsrecht
@@ -542,6 +544,36 @@
         </form>
       </section>
 
+      <section class="panel" id="lv">
+        <h2>📑 Leistungsverzeichnis automatisch bepreisen</h2>
+        <p class="panel-note">LV aus PDF, Word, Excel oder Copy-Paste einlesen, Positionen erkennen und automatisch
+          Richtpreise vorbelegen.</p>
+        <form id="lv-form">
+          <div class="mini-grid">
+            <label>Projekt<input name="projectName" placeholder="z. B. MFH Bochum – Ausbau" required /></label>
+            <label>Kunde / Bauherr<input name="customerName" placeholder="Kunde / Bauherr" /></label>
+            <label>Marge / Aufschlag (%)<input name="marginPercent" type="number" step="0.1" value="12" /></label>
+            <label>Datei auswählen<input id="lv-file" type="file"
+                accept=".txt,.csv,.json,.xml,.pdf,.doc,.docx,.xls,.xlsx" /></label>
+          </div>
+          <label>LV-Inhalt / kopierter Text<textarea id="lv-rawText" name="rawText"
+              placeholder="Leistungsverzeichnis aus PDF, Word oder Excel hier einfügen – z. B.&#10;Trockenbauwand 120 m2&#10;Elektroinstallation 14 Std&#10;Baureinigung 95 m2"
+              required></textarea></label>
+          <label>Notizen<textarea name="notes"
+              placeholder="Interne Hinweise, Rabattlogik, Materialannahmen..."></textarea></label>
+          <div class="form-actions">
+            <button class="btn btn-secondary" type="button" id="lv-read-file">Datei einlesen</button>
+            <button class="btn btn-blue" type="button" id="lv-analyze">Positionen analysieren</button>
+            <button class="btn btn-primary" type="submit">LV speichern & Angebot öffnen</button>
+          </div>
+          <div class="status" id="lv-status"></div>
+        </form>
+        <div class="callout"><strong>MVP aktiv:</strong> Text- und CSV-Dateien werden direkt eingelesen. Bei PDF/Word/Excel
+          funktioniert am zuverlässigsten Copy-Paste des Inhalts; danach werden die Preise automatisch vorbelegt und als
+          druckbares Angebot/CSV exportiert.</div>
+        <div class="list-card" id="lv-preview"></div>
+      </section>
+
       </div>
 
       <section class="panel" id="worker-portal">
@@ -575,6 +607,10 @@
         <h3>Rechnungsübersicht</h3>
         <div class="list-card" id="invoices-list"></div>
       </section>
+<section class="panel">
+  <h3>Leistungsverzeichnisse & Preisexporte</h3>
+  <div class="list-card" id="lv-list"></div>
+</section>
     </main>
 
     <script>
@@ -582,6 +618,8 @@
         workers: [],
         tasks: [],
         invoices: [],
+        lvDocuments: [],
+        lvDraft: null,
         stats: {},
         workerSession: null,
         adminAuth: null
@@ -599,6 +637,10 @@
       const workersList = document.getElementById('workers-list');
       const tasksList = document.getElementById('tasks-list');
       const invoicesList = document.getElementById('invoices-list');
+        const lvList = document.getElementById('lv-list');
+        const lvPreview = document.getElementById('lv-preview');
+        const lvFile = document.getElementById('lv-file');
+        const lvRawText = document.getElementById('lv-rawText');
       const assignedWorkerIds = document.getElementById('assignedWorkerIds');
       const invoiceItems = document.getElementById('invoice-items');
       const workerPortalContent = document.getElementById('worker-portal-content');
@@ -645,9 +687,34 @@
         workersList.innerHTML = '<p class="muted">Bitte zuerst als Admin einloggen.</p>';
         tasksList.innerHTML = '<p class="muted">Bitte zuerst als Admin einloggen.</p>';
         invoicesList.innerHTML = '<p class="muted">Bitte zuerst als Admin einloggen.</p>';
+        lvList.innerHTML = '<p class="muted">Bitte zuerst als Admin einloggen.</p>';
+        lvPreview.innerHTML = '<p class="muted">Nach der Analyse erscheinen hier automatisch erkannte LV-Positionen.</p>';
         assignedWorkerIds.innerHTML = '';
         setStatus('admin-status', message || 'Bitte mit Admin-Zugang einloggen, um die internen Module zu verwalten.', type || '');
       }
+
+        const FALLBACK_API_ORIGIN = 'https://aba-gmbh.eu';
+
+        function buildApiCandidates(url) {
+          if (/^https?:\/\//i.test(url)) {
+            return [url];
+          }
+
+          const candidates = [];
+          const protocol = window.location.protocol || '';
+          const hasHttpOrigin = protocol === 'http:' || protocol === 'https:';
+
+          if (hasHttpOrigin && window.location.origin) {
+            candidates.push(new URL(url, window.location.origin).toString());
+          }
+
+          const fallbackUrl = new URL(url, FALLBACK_API_ORIGIN).toString();
+          if (!candidates.includes(fallbackUrl)) {
+            candidates.push(fallbackUrl);
+          }
+
+          return candidates;
+        }
 
       async function apiRequest(url, options = {}) {
         const headers = {
@@ -665,15 +732,30 @@
           headers
         };
 
-        const response = await fetch(url, config);
-        const contentType = response.headers.get('content-type') || '';
-        const data = contentType.includes('application/json') ? await response.json() : null;
+        let lastError = null;
 
-        if (!response.ok) {
-          throw new Error((data && data.error) || 'Anfrage fehlgeschlagen.');
+        for (const candidate of buildApiCandidates(url)) {
+          try {
+            const response = await fetch(candidate, config);
+            const contentType = response.headers.get('content-type') || '';
+            const data = contentType.includes('application/json') ? await response.json() : null;
+
+            if (!response.ok) {
+              throw new Error((data && data.error) || 'Anfrage fehlgeschlagen.');
+            }
+
+            return data;
+          } catch (error) {
+            lastError = error;
+          }
         }
 
-        return data;
+        const message = String((lastError && lastError.message) || '').trim();
+        if (/failed to fetch|networkerror|load failed/i.test(message)) {
+          throw new Error('Netzwerkfehler. Bitte das Portal über https://aba-gmbh.eu/office.html öffnen und die Seite neu laden.');
+        }
+
+        throw lastError || new Error('Anfrage fehlgeschlagen.');
       }
 
       function renderStats() {
@@ -683,6 +765,7 @@
           ['Offene Aufgaben', state.stats.openTaskCount || 0],
           ['In Arbeit', state.stats.inProgressTaskCount || 0],
           ['Rechnungen', state.stats.invoiceCount || 0],
+          ['LV-Analysen', state.stats.lvDocumentCount || 0],
           ['Offener Zahlbetrag', formatCurrency(state.stats.payableInvoiceTotal || 0)]
         ];
 
@@ -823,13 +906,219 @@
                   <td>${escapeHtml(invoice.customerName)}</td>
                   <td>${escapeHtml(invoice.projectName)}<br /><span class="muted">Fällig: ${escapeHtml(formatDate(invoice.dueDate))}</span></td>
                   <td>${escapeHtml(formatCurrency(invoice.totals && invoice.totals.payableAmount))}</td>
-                  <td><a class="btn btn-secondary" href="/api/admin/invoices/${invoice.id}/print" target="_blank" rel="noopener">Drucken</a></td>
+                  <td>
+                    <div class="task-actions">
+                      <a class="btn btn-secondary" href="/api/admin/invoices/${invoice.id}/print" target="_blank" rel="noopener">Ansicht</a>
+                      <button class="btn btn-secondary" type="button" data-copy-invoice="${invoice.id}">Kopieren</button>
+                      <button class="btn btn-primary" type="button" data-pdf-invoice="${invoice.id}">PDF</button>
+                    </div>
+                  </td>
                 </tr>
               `).join('')}
             </tbody>
           </table>
         `;
+
+        invoicesList.querySelectorAll('[data-copy-invoice]').forEach((button) => {
+          button.addEventListener('click', async (event) => {
+            const invoice = state.invoices.find((entry) => entry.id === event.currentTarget.getAttribute('data-copy-invoice'));
+            if (!invoice) return;
+            try {
+              await copyTextToClipboard(buildInvoiceClipboardText(invoice));
+              setStatus('invoice-status', `Rechnung ${invoice.invoiceNumber} wurde in die Zwischenablage kopiert.`, 'success');
+            } catch (error) {
+              setStatus('invoice-status', error.message, 'error');
+            }
+          });
+        });
+
+        invoicesList.querySelectorAll('[data-pdf-invoice]').forEach((button) => {
+          button.addEventListener('click', (event) => {
+            const invoiceId = event.currentTarget.getAttribute('data-pdf-invoice');
+            openPdfPrint(`/api/admin/invoices/${invoiceId}/print`);
+          });
+        });
       }
+
+      async function copyTextToClipboard(text) {
+        const value = String(text || '').trim();
+        if (!value) {
+          throw new Error('Es gibt noch nichts zum Kopieren.');
+        }
+
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+
+        const textArea = document.createElement('textarea');
+        textArea.value = value;
+        textArea.setAttribute('readonly', 'readonly');
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+
+      function buildInvoiceClipboardText(invoice) {
+        const itemsText = (invoice.items || []).map((item, index) => {
+          return `${index + 1}. ${item.description} — ${item.quantity} ${item.unit} × ${formatCurrency(item.unitPrice)} = ${formatCurrency(item.quantity * item.unitPrice)}`;
+        }).join('\n');
+
+        return [
+          `${invoice.invoiceTypeLabel} ${invoice.invoiceNumber}`,
+          `Kunde: ${invoice.customerName}`,
+          `Projekt: ${invoice.projectName}`,
+          `Rechnungsdatum: ${formatDate(invoice.issueDate)}`,
+          `Fällig: ${formatDate(invoice.dueDate)}`,
+          '',
+          'Positionen:',
+          itemsText || '-',
+          '',
+          `Netto: ${formatCurrency(invoice.totals && invoice.totals.netAmount)}`,
+          `MwSt.: ${formatCurrency(invoice.totals && invoice.totals.vatAmount)}`,
+          `Zahlbetrag: ${formatCurrency(invoice.totals && invoice.totals.payableAmount)}`
+        ].join('\n');
+      }
+
+      function buildLvClipboardText(document) {
+        const itemsText = (document.items || []).map((item, index) => {
+          return `${index + 1}. ${item.description} — ${item.quantity} ${item.unit} × ${formatCurrency(item.unitPrice)} = ${formatCurrency(item.totalPrice)}`;
+        }).join('\n');
+
+        return [
+          `Leistungsverzeichnis ${document.referenceNumber}`,
+          `Projekt: ${document.projectName || '-'}`,
+          `Kunde: ${document.customerName || '-'}`,
+          '',
+          'Positionen:',
+          itemsText || '-',
+          '',
+          `Netto gesamt: ${formatCurrency(document.totals && document.totals.netAmount)}`
+        ].join('\n');
+      }
+
+      function openPdfPrint(url) {
+        const separator = url.includes('?') ? '&' : '?';
+        window.open(`${url}${separator}autoprint=1`, '_blank', 'noopener');
+      }
+
+        function renderLvPreview() {
+          if (!state.lvDraft || !Array.isArray(state.lvDraft.items) || !state.lvDraft.items.length) {
+            lvPreview.innerHTML = '<p class="muted">Noch keine LV-Analyse vorhanden. Nach dem Einlesen erscheinen hier automatisch erkannte Positionen mit Richtpreisen.</p>';
+            return;
+          }
+
+          lvPreview.innerHTML = `
+          <div class="callout">
+            <strong>Analyse fertig:</strong> ${escapeHtml(state.lvDraft.totals.itemCount)} Position(en) erkannt · Netto ${escapeHtml(formatCurrency(state.lvDraft.totals.netAmount))}
+          </div>
+          ${(state.lvDraft.warnings || []).map((warning) => `<p class="helper">• ${escapeHtml(warning)}</p>`).join('')}
+          <table>
+            <thead>
+              <tr>
+                <th>Pos.</th>
+                <th>Beschreibung</th>
+                <th>Menge</th>
+                <th>Einheit</th>
+                <th>EP</th>
+                <th>Gesamt</th>
+                <th>Preislogik</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.lvDraft.items.map((item) => `
+                <tr>
+                  <td>${escapeHtml(item.position)}</td>
+                  <td>${escapeHtml(item.description)}</td>
+                  <td>${escapeHtml(item.quantity)}</td>
+                  <td>${escapeHtml(item.unit)}</td>
+                  <td>${escapeHtml(formatCurrency(item.unitPrice))}</td>
+                  <td>${escapeHtml(formatCurrency(item.totalPrice))}</td>
+                  <td>${escapeHtml(item.pricingNote)}<br /><span class="muted">Confidence: ${escapeHtml(item.confidence)}%</span></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+        }
+
+        function renderLvDocuments() {
+          if (!state.lvDocuments.length) {
+            lvList.innerHTML = '<p class="muted">Noch keine Leistungsverzeichnisse gespeichert.</p>';
+            return;
+          }
+
+          lvList.innerHTML = `
+          <table>
+            <thead>
+              <tr>
+                <th>Referenz</th>
+                <th>Projekt</th>
+                <th>Kunde</th>
+                <th>Netto</th>
+                <th>Export</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.lvDocuments.map((doc) => `
+                <tr>
+                  <td><strong>${escapeHtml(doc.referenceNumber)}</strong><br /><span class="muted">${escapeHtml(formatDate(doc.createdAt))}</span></td>
+                  <td>${escapeHtml(doc.projectName || '–')}<br /><span class="muted">${escapeHtml(doc.fileName || doc.sourceType || 'Manuell')}</span></td>
+                  <td>${escapeHtml(doc.customerName || '–')}</td>
+                  <td>${escapeHtml(formatCurrency(doc.totals && doc.totals.netAmount))}</td>
+                  <td>
+                    <div class="task-actions">
+                      <button class="btn btn-secondary" type="button" data-copy-lv="${doc.id}">Kopieren</button>
+                      <button class="btn btn-primary" type="button" data-pdf-lv="${doc.id}">PDF</button>
+                      <a class="btn btn-secondary" href="/api/admin/lv/${doc.id}/print" target="_blank" rel="noopener">Ansicht</a>
+                      <a class="btn btn-blue" href="/api/admin/lv/${doc.id}/export.csv" rel="noopener">CSV</a>
+                    </div>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+
+        lvList.querySelectorAll('[data-copy-lv]').forEach((button) => {
+          button.addEventListener('click', async (event) => {
+            const document = state.lvDocuments.find((entry) => entry.id === event.currentTarget.getAttribute('data-copy-lv'));
+            if (!document) return;
+            try {
+              await copyTextToClipboard(buildLvClipboardText(document));
+              setStatus('lv-status', `${document.referenceNumber} wurde in die Zwischenablage kopiert.`, 'success');
+            } catch (error) {
+              setStatus('lv-status', error.message, 'error');
+            }
+          });
+        });
+
+        lvList.querySelectorAll('[data-pdf-lv]').forEach((button) => {
+          button.addEventListener('click', (event) => {
+            const documentId = event.currentTarget.getAttribute('data-pdf-lv');
+            openPdfPrint(`/api/admin/lv/${documentId}/print`);
+          });
+        });
+        }
+
+        async function readLvFileIntoTextarea() {
+          const file = lvFile.files && lvFile.files[0];
+          if (!file) {
+            throw new Error('Bitte zuerst eine Datei auswählen.');
+          }
+
+          const text = await file.text();
+          if (!text || !text.trim()) {
+            throw new Error('Datei konnte nicht direkt gelesen werden. Bitte Inhalt aus PDF/Word/Excel kopieren und hier einfügen.');
+          }
+
+          lvRawText.value = text.slice(0, 50000);
+          return { text, file };
+        }
 
       function renderWorkerPortal() {
         if (!state.workerSession) {
@@ -912,6 +1201,7 @@
         state.workers = data.workers || [];
         state.tasks = data.tasks || [];
         state.invoices = data.invoices || [];
+        state.lvDocuments = data.lvDocuments || [];
         state.stats = data.stats || {};
         renderAdminState();
         renderStats();
@@ -919,6 +1209,8 @@
         renderWorkers();
         renderTasks();
         renderInvoices();
+        renderLvDocuments();
+        renderLvPreview();
       }
 
       async function refreshWorkerSession() {
@@ -1031,13 +1323,75 @@
             method: 'POST',
             body: JSON.stringify(payload)
           });
-          setStatus('invoice-status', `Rechnung ${invoice.invoiceNumber} erstellt.`, 'success');
+          setStatus('invoice-status', `Rechnung ${invoice.invoiceNumber} erstellt. Kopieren oder PDF sind jetzt verfügbar.`, 'success');
           await loadDashboard();
-          window.open(`/api/admin/invoices/${invoice.id}/print`, '_blank', 'noopener');
+          openPdfPrint(`/api/admin/invoices/${invoice.id}/print`);
         } catch (error) {
           setStatus('invoice-status', error.message, 'error');
         }
       });
+
+        document.getElementById('lv-read-file').addEventListener('click', async () => {
+          setStatus('lv-status', 'Datei wird eingelesen...');
+          try {
+            const result = await readLvFileIntoTextarea();
+            setStatus('lv-status', `Datei geladen: ${result.file.name}`, 'success');
+          } catch (error) {
+            setStatus('lv-status', error.message, 'error');
+          }
+        });
+
+        document.getElementById('lv-analyze').addEventListener('click', async () => {
+          const form = document.getElementById('lv-form');
+          const formData = new FormData(form);
+          const payload = Object.fromEntries(formData.entries());
+          payload.sourceType = lvFile.files && lvFile.files[0] ? 'file-upload' : 'copy-paste';
+          payload.fileName = lvFile.files && lvFile.files[0] ? lvFile.files[0].name : '';
+
+          setStatus('lv-status', 'Leistungsverzeichnis wird analysiert...');
+          try {
+            const draft = await apiRequest('/api/admin/lv/analyze', {
+              method: 'POST',
+              body: JSON.stringify(payload)
+            });
+            state.lvDraft = draft;
+            renderLvPreview();
+            setStatus('lv-status', `${draft.totals.itemCount} Position(en) erkannt und bepreist.`, 'success');
+          } catch (error) {
+            state.lvDraft = null;
+            renderLvPreview();
+            setStatus('lv-status', error.message, 'error');
+          }
+        });
+
+        document.getElementById('lv-form').addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const formData = new FormData(form);
+          const payload = Object.fromEntries(formData.entries());
+          payload.sourceType = lvFile.files && lvFile.files[0] ? 'file-upload' : 'copy-paste';
+          payload.fileName = lvFile.files && lvFile.files[0] ? lvFile.files[0].name : '';
+          if (state.lvDraft && Array.isArray(state.lvDraft.items)) {
+            payload.items = state.lvDraft.items;
+          }
+
+          setStatus('lv-status', 'LV wird gespeichert und als Angebot vorbereitet...');
+          try {
+            const document = await apiRequest('/api/admin/lv/documents', {
+              method: 'POST',
+              body: JSON.stringify(payload)
+            });
+            state.lvDraft = null;
+            renderLvPreview();
+            form.reset();
+            lvRawText.value = '';
+            setStatus('lv-status', `${document.referenceNumber} wurde gespeichert. Kopieren und PDF sind jetzt verfügbar.`, 'success');
+            await loadDashboard();
+            openPdfPrint(`/api/admin/lv/${document.id}/print`);
+          } catch (error) {
+            setStatus('lv-status', error.message, 'error');
+          }
+        });
 
       document.getElementById('worker-login-form').addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -1068,6 +1422,7 @@
       addInvoiceItemRow({ description: 'Arbeitsleistung', quantity: 1, unit: 'Pauschal', unitPrice: 0 });
       addInvoiceItemRow({ description: 'Material', quantity: 1, unit: 'Pauschal', unitPrice: 0 });
       renderWorkerPortal();
+        renderLvPreview();
       renderAdminState();
 
       if (state.adminAuth) {

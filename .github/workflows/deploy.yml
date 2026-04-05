@@ -1,0 +1,48 @@
+name: Deploy ABA Website
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: aba-production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust production host
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 37.27.216.254 >> ~/.ssh/known_hosts
+
+      - name: Sync files to server
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'node_modules' \
+            --exclude '.env' \
+            --exclude 'contact-submissions.ndjson' \
+            --exclude 'agent_logs.ndjson' \
+            --exclude 'aba-deploy.zip' \
+            --exclude 'aba-debug.zip' \
+            --exclude '.mypy_cache' \
+            --exclude '__pycache__' \
+            ./ root@37.27.216.254:/var/www/aba-website/
+
+      - name: Run remote rebuild
+        run: |
+          ssh root@37.27.216.254 "cd /var/www/aba-website && chmod +x remote-setup.sh deploy.sh && bash remote-setup.sh"
