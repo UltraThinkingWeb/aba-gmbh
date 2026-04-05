@@ -10,6 +10,7 @@ const submissionsFile = path.join(root, 'contact-submissions.ndjson');
 const workersFile = path.join(root, 'admin-workers.json');
 const tasksFile = path.join(root, 'admin-tasks.json');
 const invoicesFile = path.join(root, 'admin-invoices.json');
+const lvDocumentsFile = path.join(root, 'admin-lv-documents.json');
 
 const smtpHost = process.env.SMTP_HOST || process.env.SMTP_SERVER;
 const smtpPort = Number(process.env.SMTP_PORT || 587);
@@ -32,6 +33,7 @@ const adminPassword = process.env.ADMIN_PASSWORD || 'ABA2026!';
 const emailEnabled = Boolean(smtpHost && smtpPort && smtpUser && smtpPass && mailFrom && mailTo);
 const VALID_TASK_STATUSES = ['open', 'in_progress', 'done'];
 const VALID_INVOICE_TYPES = ['abschlagsrechnung', 'schlussrechnung'];
+const DEFAULT_LV_MARGIN_PERCENT = 12;
 const DEFAULT_ISSUER_DETAILS = {
   company: 'ABA GmbH',
   manager: 'Geschäftsführer / Inhaber: Ledjan Ahmati',
@@ -44,6 +46,31 @@ const DEFAULT_ISSUER_DETAILS = {
   bic: 'WELADED1BOC',
   vatId: 'DE364303365'
 };
+const UNIT_ALIASES = {
+  qm: 'm²',
+  m2: 'm²',
+  'm²': 'm²',
+  m3: 'm³',
+  'm³': 'm³',
+  lfm: 'lfm',
+  m: 'm',
+  std: 'Std.',
+  h: 'Std.',
+  st: 'Stk.',
+  stk: 'Stk.',
+  'stück': 'Stk.',
+  pauschal: 'Pauschal'
+};
+const PRICE_LIBRARY = [
+  { keywords: ['trockenbau', 'rigips', 'gipskarton'], unitPrice: 42, unit: 'm²', note: 'Richtpreis für Trockenbauflächen' },
+  { keywords: ['spachtel', 'maler', 'anstrich', 'putz'], unitPrice: 14, unit: 'm²', note: 'Richtpreis für Maler- und Spachtelarbeiten' },
+  { keywords: ['boden', 'estrich', 'vinyl', 'laminat', 'fliese'], unitPrice: 28, unit: 'm²', note: 'Richtpreis für Bodenarbeiten' },
+  { keywords: ['abbruch', 'demontage', 'rückbau'], unitPrice: 55, unit: 'm²', note: 'Richtpreis für Rückbauleistungen' },
+  { keywords: ['elektro', 'kabel', 'steckdose', 'beleuchtung'], unitPrice: 68, unit: 'Std.', note: 'Richtpreis für Elektroarbeiten' },
+  { keywords: ['sanitär', 'wasser', 'heizung', 'rohr'], unitPrice: 72, unit: 'Std.', note: 'Richtpreis für Sanitär- und Heizungsarbeiten' },
+  { keywords: ['fenster', 'tür', 'montage'], unitPrice: 180, unit: 'Stk.', note: 'Richtpreis je Stück für Montagearbeiten' },
+  { keywords: ['reinigung', 'baureinigung'], unitPrice: 6.5, unit: 'm²', note: 'Richtpreis für Bauendreinigung' }
+];
 
 const mailTransport = emailEnabled
   ? nodemailer.createTransport({
@@ -172,6 +199,15 @@ async function readInvoices() {
 
 async function writeInvoices(invoices) {
   await writeJsonFile(invoicesFile, invoices);
+}
+
+async function readLvDocuments() {
+  const documents = await readJsonFile(lvDocumentsFile, []);
+  return Array.isArray(documents) ? documents : [];
+}
+
+async function writeLvDocuments(documents) {
+  await writeJsonFile(lvDocumentsFile, documents);
 }
 
 function getInvoiceTypeLabel(invoiceType) {
@@ -489,6 +525,304 @@ function buildInvoicePrintHtml(invoice) {
     <div class="notes">
       <h3>Anmerkungen</h3>
       <p>${escapeHtml(invoice.notes || 'Keine zusätzlichen Hinweise.').replace(/\n/g, '<br>')}</p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function normalizeUnit(unit) {
+  const cleaned = String(unit || '').trim().toLowerCase();
+  return UNIT_ALIASES[cleaned] || (String(unit || '').trim() || 'Pauschal');
+}
+
+function generateLvReference(existingDocuments) {
+  const year = new Date().getFullYear();
+  const prefix = `LV-${year}-`;
+  const yearDocuments = existingDocuments.filter((entry) => String(entry.referenceNumber || '').startsWith(prefix));
+  const nextNumber = String(yearDocuments.length + 1).padStart(3, '0');
+  return `${prefix}${nextNumber}`;
+}
+
+function getLvPriceSuggestion(description, unit, marginPercent = DEFAULT_LV_MARGIN_PERCENT) {
+  const text = String(description || '').toLowerCase();
+  const normalizedUnit = normalizeUnit(unit);
+  let bestEntry = null;
+  let bestScore = 0;
+
+  for (const entry of PRICE_LIBRARY) {
+    const keywordHits = entry.keywords.reduce((sum, keyword) => sum + (text.includes(keyword) ? 1 : 0), 0);
+    const unitBonus = normalizeUnit(entry.unit) === normalizedUnit ? 0.5 : 0;
+    const score = keywordHits + unitBonus;
+
+    if (score >= 1 && score > bestScore) {
+      bestScore = score;
+      bestEntry = entry;
+    }
+  }
+
+  const fallbackUnitPrice = normalizedUnit === 'Std.'
+    ? 58
+    : normalizedUnit === 'm²'
+      ? 24
+      : normalizedUnit === 'Stk.'
+        ? 95
+        : normalizedUnit === 'lfm'
+          ? 18
+          : 120;
+
+  const baseUnitPrice = bestEntry ? bestEntry.unitPrice : fallbackUnitPrice;
+  const marginMultiplier = 1 + (Math.max(0, normalizeNumber(marginPercent)) / 100);
+  const adjustedUnitPrice = roundCurrency(baseUnitPrice * marginMultiplier);
+
+  return {
+    unitPrice: adjustedUnitPrice,
+    pricingSource: bestEntry ? 'catalog' : 'fallback',
+    confidence: bestEntry ? Math.min(98, Math.round(bestScore * 24)) : 35,
+    pricingNote: bestEntry ? bestEntry.note : 'Kein exakter Treffer im Katalog – Richtwert zur Prüfung.'
+  };
+}
+
+function parseLvLine(line) {
+  const cleaned = String(line || '').replace(/\u00a0/g, ' ').trim();
+  if (!cleaned || cleaned.length < 3) {
+    return null;
+  }
+
+  const withoutBullet = cleaned.replace(/^\s*(?:[-*•]|\d+[\.)\-:]?)\s*/, '').trim();
+  const lowered = withoutBullet.toLowerCase();
+  if (!/[a-zA-ZäöüÄÖÜ]/.test(withoutBullet) || ['leistungsverzeichnis', 'position', 'beschreibung', 'einheit', 'menge', 'ep', 'gesamt'].includes(lowered)) {
+    return null;
+  }
+
+  const unitPattern = /(m²|m2|qm|m³|m3|lfm|m|stk|stück|std|h|pauschal)\b/i;
+  const parts = withoutBullet.split(/\t|;|\|/).map((part) => part.trim()).filter(Boolean);
+
+  let description = withoutBullet;
+  let quantity = 1;
+  let unit = 'Pauschal';
+
+  if (parts.length >= 3) {
+    const numericIndex = parts.findIndex((part) => /^\d+(?:[.,]\d+)?$/.test(part));
+    const unitIndex = parts.findIndex((part) => unitPattern.test(part));
+
+    if (numericIndex !== -1) {
+      quantity = normalizeNumber(parts[numericIndex]);
+    }
+
+    if (unitIndex !== -1) {
+      const unitMatch = parts[unitIndex].match(unitPattern);
+      unit = normalizeUnit(unitMatch && unitMatch[0]);
+    }
+
+    const descriptionPart = parts.find((part, index) => index !== numericIndex && index !== unitIndex && /[a-zA-ZäöüÄÖÜ]/.test(part));
+    if (descriptionPart) {
+      description = descriptionPart;
+    }
+  } else {
+    let match = withoutBullet.match(/^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(m²|m2|qm|m³|m3|lfm|m|stk|stück|std|h|pauschal)\b/i);
+    if (match) {
+      description = match[1].trim();
+      quantity = normalizeNumber(match[2]);
+      unit = normalizeUnit(match[3]);
+    } else {
+      match = withoutBullet.match(/^(\d+(?:[.,]\d+)?)\s*(m²|m2|qm|m³|m3|lfm|m|stk|stück|std|h|pauschal)\s+(.+)$/i);
+      if (match) {
+        quantity = normalizeNumber(match[1]);
+        unit = normalizeUnit(match[2]);
+        description = match[3].trim();
+      }
+    }
+  }
+
+  return {
+    description: description || withoutBullet,
+    quantity: quantity > 0 ? quantity : 1,
+    unit: normalizeUnit(unit)
+  };
+}
+
+function buildLvAnalysis(input = {}) {
+  const marginPercent = normalizeNumber(input.marginPercent || DEFAULT_LV_MARGIN_PERCENT);
+  const rawText = String(input.rawText || '').replace(/\r/g, '');
+  const lines = rawText.split('\n').map((line) => line.trim()).filter(Boolean);
+  const parsedItems = lines.map(parseLvLine).filter(Boolean).slice(0, 200);
+
+  const items = parsedItems.map((item, index) => {
+    const pricing = getLvPriceSuggestion(item.description, item.unit, marginPercent);
+    return {
+      id: createId('lvitem'),
+      position: index + 1,
+      description: item.description,
+      quantity: roundCurrency(item.quantity),
+      unit: item.unit,
+      unitPrice: pricing.unitPrice,
+      totalPrice: roundCurrency(item.quantity * pricing.unitPrice),
+      pricingSource: pricing.pricingSource,
+      confidence: pricing.confidence,
+      pricingNote: pricing.pricingNote
+    };
+  });
+
+  const netAmount = roundCurrency(items.reduce((sum, item) => sum + normalizeNumber(item.totalPrice), 0));
+  const fallbackCount = items.filter((item) => item.pricingSource === 'fallback').length;
+
+  return {
+    fileName: String(input.fileName || '').trim(),
+    sourceType: String(input.sourceType || 'upload').trim() || 'upload',
+    projectName: String(input.projectName || '').trim(),
+    customerName: String(input.customerName || '').trim(),
+    marginPercent,
+    notes: String(input.notes || '').trim(),
+    items,
+    totals: {
+      itemCount: items.length,
+      fallbackCount,
+      netAmount
+    },
+    warnings: items.length
+      ? (fallbackCount
+          ? [`${fallbackCount} Position(en) wurden mit Richtwerten vorbelegt und sollten fachlich geprüft werden.`]
+          : ['Alle erkannten Positionen wurden mit Richtpreisen vorbelegt.'])
+      : ['Es konnten noch keine Positionen erkannt werden. Bitte den LV-Text einfügen oder eine Text-/CSV-Datei laden.']
+  };
+}
+
+function buildLvDocument(payload = {}, existingDocuments = []) {
+  const draft = buildLvAnalysis(payload);
+  const items = Array.isArray(payload.items) && payload.items.length
+    ? payload.items.map((item, index) => ({
+        id: String(item.id || createId('lvitem')).trim(),
+        position: index + 1,
+        description: String(item.description || '').trim(),
+        quantity: roundCurrency(normalizeNumber(item.quantity) || 1),
+        unit: normalizeUnit(item.unit),
+        unitPrice: roundCurrency(normalizeNumber(item.unitPrice)),
+        totalPrice: roundCurrency(normalizeNumber(item.quantity || 1) * normalizeNumber(item.unitPrice)),
+        pricingSource: String(item.pricingSource || 'manual').trim(),
+        confidence: Math.max(0, Math.round(normalizeNumber(item.confidence || 100))),
+        pricingNote: String(item.pricingNote || 'Manuell bestätigt').trim()
+      })).filter((item) => item.description)
+    : draft.items;
+
+  const netAmount = roundCurrency(items.reduce((sum, item) => sum + normalizeNumber(item.totalPrice), 0));
+
+  return {
+    id: createId('lv'),
+    referenceNumber: generateLvReference(existingDocuments),
+    fileName: draft.fileName,
+    sourceType: draft.sourceType,
+    projectName: draft.projectName,
+    customerName: draft.customerName,
+    marginPercent: draft.marginPercent,
+    notes: draft.notes,
+    items,
+    totals: {
+      itemCount: items.length,
+      fallbackCount: items.filter((item) => item.pricingSource === 'fallback').length,
+      netAmount
+    },
+    warnings: draft.warnings,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function csvEscape(value) {
+  const text = String(value ?? '');
+  return /[";,\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function buildLvExportCsv(document) {
+  const rows = [
+    ['Referenz', document.referenceNumber],
+    ['Projekt', document.projectName],
+    ['Kunde', document.customerName],
+    ['Datei', document.fileName || '-'],
+    ['Marge %', document.marginPercent],
+    [],
+    ['Pos.', 'Beschreibung', 'Menge', 'Einheit', 'EP (€)', 'Gesamt (€)', 'Hinweis']
+  ];
+
+  (document.items || []).forEach((item) => {
+    rows.push([
+      item.position,
+      item.description,
+      item.quantity,
+      item.unit,
+      roundCurrency(item.unitPrice).toFixed(2),
+      roundCurrency(item.totalPrice).toFixed(2),
+      item.pricingNote || ''
+    ]);
+  });
+
+  rows.push([]);
+  rows.push(['Netto gesamt', '', '', '', '', roundCurrency(document.totals && document.totals.netAmount).toFixed(2)]);
+
+  return rows.map((row) => row.map(csvEscape).join(';')).join('\r\n');
+}
+
+function buildLvPrintHtml(document) {
+  const rowsHtml = (document.items || []).map((item) => `
+    <tr>
+      <td>${escapeHtml(item.position)}</td>
+      <td>${escapeHtml(item.description)}</td>
+      <td>${escapeHtml(item.quantity)}</td>
+      <td>${escapeHtml(item.unit)}</td>
+      <td>${escapeHtml(formatCurrency(item.unitPrice))}</td>
+      <td>${escapeHtml(formatCurrency(item.totalPrice))}</td>
+    </tr>
+  `).join('');
+
+  return `<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>${escapeHtml(document.referenceNumber)} – Leistungsverzeichnis</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; padding: 28px; color: #1b2a1d; }
+    .sheet { max-width: 980px; margin: 0 auto; }
+    .box { border: 1px solid #dfe7df; border-radius: 16px; padding: 18px; margin-bottom: 18px; background: #f7faf7; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #dfe7df; padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #edf5ed; color: #1f5f25; }
+    .muted { color: #5f6f61; }
+    .total { text-align: right; font-size: 18px; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="box">
+      <h1>${escapeHtml(DEFAULT_ISSUER_DETAILS.company)}</h1>
+      <p class="muted">Automatisch vorbelegtes Leistungsverzeichnis / Angebotsentwurf</p>
+      <p><strong>Referenz:</strong> ${escapeHtml(document.referenceNumber)}<br>
+      <strong>Projekt:</strong> ${escapeHtml(document.projectName || '-')}<br>
+      <strong>Kunde:</strong> ${escapeHtml(document.customerName || '-')}<br>
+      <strong>Erstellt:</strong> ${escapeHtml(formatGermanDate(document.createdAt))}</p>
+    </div>
+
+    <div class="box">
+      <table>
+        <thead>
+          <tr>
+            <th>Pos.</th>
+            <th>Beschreibung</th>
+            <th>Menge</th>
+            <th>Einheit</th>
+            <th>EP</th>
+            <th>Gesamt</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <p class="total">Netto gesamt: ${escapeHtml(formatCurrency(document.totals && document.totals.netAmount))}</p>
+    </div>
+
+    <div class="box">
+      <h3>Hinweise</h3>
+      <p>${escapeHtml(document.notes || 'Automatisch aus dem Leistungsverzeichnis erzeugter Preisvorschlag. Bitte vor Versand fachlich prüfen.').replace(/\n/g, '<br>')}</p>
+      <ul>
+        ${(document.warnings || []).map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}
+      </ul>
     </div>
   </div>
 </body>
@@ -817,7 +1151,7 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    Promise.all([readWorkers(), readTasks(), readInvoices()]).then(([workers, tasks, invoices]) => {
+    Promise.all([readWorkers(), readTasks(), readInvoices(), readLvDocuments()]).then(([workers, tasks, invoices, lvDocuments]) => {
       const stats = {
         workerCount: workers.length,
         activeWorkerCount: workers.filter((worker) => worker.status === 'active').length,
@@ -825,10 +1159,11 @@ const server = http.createServer((req, res) => {
         inProgressTaskCount: tasks.filter((task) => task.status === 'in_progress').length,
         doneTaskCount: tasks.filter((task) => task.status === 'done').length,
         invoiceCount: invoices.length,
+        lvDocumentCount: lvDocuments.length,
         payableInvoiceTotal: roundCurrency(invoices.reduce((sum, invoice) => sum + normalizeNumber(invoice.totals && invoice.totals.payableAmount), 0))
       };
 
-      sendJson(res, 200, { workers, tasks, invoices, stats });
+      sendJson(res, 200, { workers, tasks, invoices, lvDocuments, stats });
     }).catch(() => {
       sendJson(res, 500, { error: 'Admin-Daten konnten nicht geladen werden.' });
     });
@@ -1276,6 +1611,109 @@ const server = http.createServer((req, res) => {
       sendHtml(res, 200, buildInvoicePrintHtml(invoice));
     }).catch(() => {
       sendHtml(res, 500, '<h1>Rechnung konnte nicht geladen werden</h1>');
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/admin/lv/analyze') {
+    if (!requireAdminCredentials(req, res)) {
+      return;
+    }
+
+    collectRequestBody(req).then((body) => {
+      let payload;
+      try {
+        payload = JSON.parse(body || '{}');
+      } catch (error) {
+        sendJson(res, 400, { error: 'Ungültige JSON-Daten.' });
+        return;
+      }
+
+      const rawText = String(payload.rawText || '').trim();
+      if (!rawText) {
+        sendJson(res, 400, { error: 'Bitte den Inhalt des Leistungsverzeichnisses einfügen oder eine Datei laden.' });
+        return;
+      }
+
+      const draft = buildLvAnalysis(payload);
+      sendJson(res, 200, draft);
+    }).catch(() => {
+      sendJson(res, 500, { error: 'LV-Analyse konnte nicht durchgeführt werden.' });
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/admin/lv/documents') {
+    if (!requireAdminCredentials(req, res)) {
+      return;
+    }
+
+    collectRequestBody(req).then(async (body) => {
+      let payload;
+      try {
+        payload = JSON.parse(body || '{}');
+      } catch (error) {
+        sendJson(res, 400, { error: 'Ungültige JSON-Daten.' });
+        return;
+      }
+
+      const lvDocuments = await readLvDocuments();
+      const document = buildLvDocument(payload, lvDocuments);
+
+      if (!document.items.length) {
+        sendJson(res, 400, { error: 'Es wurden keine LV-Positionen erkannt. Bitte Text prüfen.' });
+        return;
+      }
+
+      lvDocuments.push(document);
+      await writeLvDocuments(lvDocuments);
+      sendJson(res, 201, document);
+    }).catch(() => {
+      sendJson(res, 500, { error: 'Leistungsverzeichnis konnte nicht gespeichert werden.' });
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && /^\/api\/admin\/lv\/[^/]+\/print$/.test(req.url.split('?')[0])) {
+    const match = req.url.split('?')[0].match(/^\/api\/admin\/lv\/([^/]+)\/print$/);
+    const documentId = match && match[1];
+
+    readLvDocuments().then((documents) => {
+      const document = documents.find((entry) => entry.id === documentId);
+
+      if (!document) {
+        sendHtml(res, 404, '<h1>Leistungsverzeichnis nicht gefunden</h1>');
+        return;
+      }
+
+      sendHtml(res, 200, buildLvPrintHtml(document));
+    }).catch(() => {
+      sendHtml(res, 500, '<h1>Leistungsverzeichnis konnte nicht geladen werden</h1>');
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && /^\/api\/admin\/lv\/[^/]+\/export\.csv$/.test(req.url.split('?')[0])) {
+    const match = req.url.split('?')[0].match(/^\/api\/admin\/lv\/([^/]+)\/export\.csv$/);
+    const documentId = match && match[1];
+
+    readLvDocuments().then((documents) => {
+      const document = documents.find((entry) => entry.id === documentId);
+
+      if (!document) {
+        sendJson(res, 404, { error: 'Leistungsverzeichnis nicht gefunden.' });
+        return;
+      }
+
+      res.writeHead(200, {
+        ...SECURITY_HEADERS,
+        'Content-Type': 'text/csv; charset=UTF-8',
+        'Content-Disposition': `attachment; filename="${String(document.referenceNumber || 'lv-export').replace(/[^a-zA-Z0-9-_]/g, '_')}.csv"`,
+        'Cache-Control': 'no-store'
+      });
+      res.end(buildLvExportCsv(document));
+    }).catch(() => {
+      sendJson(res, 500, { error: 'CSV-Export konnte nicht erstellt werden.' });
     });
     return;
   }
